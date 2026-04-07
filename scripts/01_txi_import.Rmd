@@ -1,0 +1,55 @@
+---
+title: "TXI import"
+output: html_notebook
+---
+
+```{r}
+library(tximport)
+library(biomaRt)
+library(dplyr)
+
+setwd("/Users/mnyamari/Desktop/GTEx/variance-decomp")
+kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/variance-decomp/gtex_bgee"
+
+# sample IDs
+sample_ids <- read_lines("/Users/mnyamari/Desktop/GTEx/variance-decomp/gtex_acc.txt")
+
+list.files(file.path(kallisto_dir, sample_ids[1]))
+
+abundance_files <- file.path(kallisto_dir, sample_ids, "abundance.tsv")
+names(abundance_files) <- sample_ids
+missing <- abundance_files[!file.exists(abundance_files)]
+```
+
+
+```{r}
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  
+# Get transcript to gene mapping
+tx2gene <- getBM(
+  attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+  mart = ensembl
+)
+
+colnames(tx2gene) <- c("transcript_id", "gene_id")
+
+if (length(missing) > 0) {
+  print(missing)
+}
+```
+
+```{r Import}
+txi <- tximport(
+  files = abundance_files,
+  type = "kallisto",
+  tx2gene = tx2gene,
+  countsFromAbundance = "no",
+  ignoreTxVersion = TRUE
+)
+
+cat(nrow(txi$counts))
+
+saveRDS(txi, "/Users/mnyamari/Desktop/GTEx/variance-decomp/bgee_gtex_tximport_gene_level.rds")
+
+```
+
