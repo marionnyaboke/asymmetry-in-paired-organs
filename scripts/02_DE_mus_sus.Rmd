@@ -138,7 +138,7 @@ write.csv(metadata, "metadata_clean.csv", row.names = FALSE)
 
 ```
 
-```{r}
+```{r transcript to gene mapping}
 library(tximport)
 library(biomaRt)
 library(dplyr)
