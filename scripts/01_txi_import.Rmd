@@ -8,11 +8,10 @@ library(tximport)
 library(biomaRt)
 library(dplyr)
 
-setwd("/Users/mnyamari/Desktop/GTEx/variance-decomp")
-kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/variance-decomp/gtex_bgee"
+kallisto_dir <- "gtex_bgee"
 
 # sample IDs
-sample_ids <- read_lines("/Users/mnyamari/Desktop/GTEx/variance-decomp/gtex_acc.txt")
+sample_ids <- read_lines("gtex_acc.txt")
 
 list.files(file.path(kallisto_dir, sample_ids[1]))
 
@@ -49,7 +48,7 @@ txi <- tximport(
 
 cat(nrow(txi$counts))
 
-saveRDS(txi, "/Users/mnyamari/Desktop/GTEx/variance-decomp/bgee_gtex_tximport_gene_level.rds")
+saveRDS(txi, "bgee_gtex_tximport_gene_level.rds")
 
 ```
 
