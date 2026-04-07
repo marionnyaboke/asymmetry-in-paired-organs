@@ -1,0 +1,159 @@
+---
+title: "OrthoDB DEG Conservation"
+output:output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+```
+
+
+```{r }
+
+mouse_rds <- "results_mouse.rds"
+pig_rds   <- "results_pig.rds"
+
+#OrthoDB download directory 
+orthodb_dir <- "/Users/mnyamari/Desktop/GTEx/variance-decomp/orthodb_data"
+dir.create(orthodb_dir, showWarnings = FALSE)
+
+padj_cutoff  <- 0.05
+variable_use <- "side"   
+
+# OrthoDB taxon IDs
+mouse_taxid <- "10090"
+pig_taxid   <- "9823"
+
+# Mammalia clade ID in OrthoDB 
+mammalia_level <- "40674"
+```
+
+
+```{r load_results}
+mouse_results <- readRDS(mouse_rds)
+pig_results   <- readRDS(pig_rds)
+
+all_results <- bind_rows(mouse_results, pig_results)
+```
+
+```{r filter_degs}
+# significant DEGs 
+sig_degs <- all_results %>%
+  filter(variable == variable_use, padj < padj_cutoff) %>%
+  mutate(gene_clean = sub("\\.\\d+$", "", gene)) %>%
+  # standardise species labels to match OrthoDB taxon IDs
+  mutate(taxid = case_when(
+    str_detect(species, regex("mus|mouse|musculus", ignore_case = TRUE))   ~ mouse_taxid,
+    str_detect(species, regex("sus|pig|scrofa",     ignore_case = TRUE))   ~ pig_taxid,
+    TRUE ~ NA_character_
+  ))
+
+sig_degs %>%
+  group_by(species, organ) %>%
+  summarise(n_degs = n_distinct(gene_clean), .groups = "drop") %>%
+  print(n = Inf)
+```
+
+
+```{r parse_orthodb_tables}
+setDTthreads(4)
+
+target_taxa <- c(mouse_taxid, pig_taxid)
+
+# OGs Mammalia level only
+ogs <- fread(file.path(ORTHODB_DIR, "odb12v2_OGs.tab.gz"),
+             header = FALSE, sep = "\t",
+             col.names = c("og_id", "level_taxid", "og_name")) %>%
+  filter(level_taxid == mammalia_level)
+
+
+# OG to gene filtered to Mammalia OGs
+og2gene <- fread(file.path(orthodb_dir, "odb12v2_OG2genes.tab.gz"),
+                 header = FALSE, sep = "\t",
+                 col.names = c("og_id", "odb_gene_id")) %>%
+  filter(og_id %in% ogs$og_id)
+
+# Gene metadata
+setDTthreads(4)
+
+genes_raw <- fread(
+  file.path(orthodb_dir, "odb12v2_genes.tab.gz"),
+  header    = FALSE,
+  sep       = "\t",
+  select    = c(1, 2, 6, 7),
+  col.names = c("odb_gene_id", "organism_id", "ensembl_ids", "gene_name"),
+  nThread   = 4
+)
+
+# organism_id
+genes_raw[, taxid := sub("_.*", "", organism_id)]
+
+# Filter to 2 species
+genes_meta <- genes_raw[taxid %in% target_taxa]
+
+print(genes_meta[, .N, by = taxid])
+
+```
+
+```{r map_ensembl_to_odb}
+# Ensembl ID to odb_gene_id lookup, restricted to 2 species
+ensembl_map <- genes_meta[ensembl_ids != ""] %>%
+  as_tibble() %>%
+  separate_rows(ensembl_ids, sep = ";") %>%
+  filter(ensembl_ids != "") %>%
+  mutate(ensembl_ids = sub("\\.\\d+$", "", ensembl_ids)) %>%
+  dplyr::select(ensembl_id = ensembl_ids, odb_gene_id, taxid)
+
+head(ensembl_map)
+
+# Map each significant DEG
+degs_mapped <- sig_degs %>%
+  left_join(ensembl_map,
+            by = c("gene_clean" = "ensembl_id", "taxid" = "taxid")) %>%
+  mutate(mapped = !is.na(odb_gene_id))
+
+# Mapping rate per species
+mapping_stats <- degs_mapped %>%
+  group_by(species, organ) %>%
+  summarise(
+    total   = n_distinct(gene_clean),
+    mapped  = n_distinct(gene_clean[mapped]),
+    pct     = round(100 * mapped / total, 1),
+    .groups = "drop"
+  )
+
+print(mapping_stats)
+
+write_csv(degs_mapped, "degs_mapped_10.csv") 
+
+# Unmapped genes are:
+# Non-coding RNA genes (OrthoDB focuses on protein-coding)
+# Very recent annotation additions not yet in OrthoDB v12.2
+```
+
+```{r build_conservation_table}
+# Get OGs that contain any of our DEGs
+degs_with_og <- degs_mapped %>%
+  filter(mapped) %>%
+  inner_join(og2gene, by = "odb_gene_id")
+
+# Find OGs where both mouse and pig DEGs are present
+shared_ogs <- degs_with_og %>%
+  group_by(og_id) %>%
+  filter(n_distinct(taxid) == 2) %>%
+  ungroup()
+
+# Build conservation table with gene details per species
+conservation_table <- shared_ogs %>%
+  left_join(genes_meta %>% dplyr::select(odb_gene_id, gene_name),
+            by = "odb_gene_id") %>%
+  mutate(species_label = if_else(taxid == mouse_taxid, "mouse", "pig")) %>%
+  dplyr::select(og_id, organ, species_label, gene_clean, gene_name, log2FoldChange, padj) %>%
+  arrange(og_id, species_label)
+
+print(conservation_table)
+
+write_csv(conservation_table, "conserved_orthologs_mouse_pig.csv")
+```
+
