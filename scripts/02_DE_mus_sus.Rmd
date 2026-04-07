@@ -1,13 +1,11 @@
 ---
-title: "R Notebook"
+title: "DE for mouse and pig"
 output: html_notebook
 ---
 
 ```{r}
 library(dplyr)
 library(data.table)
-
-setwd("/Users/mnyamari/Desktop/GTEx/variance-decomp")
 
 metadata <- read.csv("Metadata_full.csv")
 colnames(metadata)
@@ -70,7 +68,7 @@ print(sample_counts)
 # Get sample IDs from metadata
 sample_ids <- metadata$libraryid
 
-kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/kallisto_out"
+kallisto_dir <- "kallisto_out"
 missing_files <- c()
 
 for (id in sample_ids) {
@@ -81,7 +79,6 @@ for (id in sample_ids) {
 }
 
 length(missing_files)
-
 ```
 
 
@@ -119,7 +116,7 @@ extract_age <- function(age_string) {
   }
 }
 
-# Apply to all samples
+# Apply to samples
 metadata$age_weeks <- sapply(metadata$stageauthorannotation, extract_age)
 summary(metadata$age_weeks)
 
@@ -146,9 +143,9 @@ library(tximport)
 library(biomaRt)
 library(dplyr)
 
-kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/kallisto_out"
+kallisto_dir <- "kallisto_out"
 
-# Get sample IDs from metadata
+# Get sample IDs
 sample_ids <- metadata$libraryid
 
 # file paths
@@ -161,14 +158,10 @@ create_tx2gene <- function(species_name) {
   # Map species names to Ensembl dataset names
   dataset_map <- c(
     "Mus_musculus" = "mmusculus_gene_ensembl",
-    "Sus_scrofa" = "sscrofa_gene_ensembl",
-    "Ovis_aries" = "oaries_gene_ensembl"
+    "Sus_scrofa" = "sscrofa_gene_ensembl"
   )
   
   dataset <- dataset_map[species_name]
-  
-  if (is.na(dataset)) {
-    stop("Unknown species: ", species_name)
   }
   
   # Connect to Ensembl
@@ -190,24 +183,16 @@ create_tx2gene <- function(species_name) {
 # Create tx2gene for each species
 tx2gene_mouse <- create_tx2gene("Mus_musculus")
 tx2gene_pig <- create_tx2gene("Sus_scrofa")
-#tx2gene_sheep <- create_tx2gene("Ovis_aries")
 
 tx2gene_mouse$transcript_id <- sub("\\..*", "", tx2gene_mouse$transcript_id)
 tx2gene_pig$transcript_id <- sub("\\..*", "", tx2gene_pig$transcript_id)
-#tx2gene_sheep$transcript_id <- sub("\\..*", "", tx2gene_sheep$transcript_id)
 
 saveRDS(tx2gene_mouse, "tx2gene_mouse.rds")
 saveRDS(tx2gene_pig, "tx2gene_pig.rds")
-#saveRDS(tx2gene_sheep, "tx2gene_sheep.rds")
-
 ```
 
 
 ```{r Import with tximport}
-
-# tx2gene_mouse <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_mouse.rds")
-# tx2gene_pig <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_pig.rds")
-# tx2gene_sheep <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_sheep.rds")
 
 import_species <- function(species_name, tx2gene, metadata, files) {
   
@@ -233,42 +218,10 @@ import_species <- function(species_name, tx2gene, metadata, files) {
 
 txi_mouse <- import_species("Mus_musculus", tx2gene_mouse, metadata, abundance_files)
 txi_pig <- import_species("Sus_scrofa", tx2gene_pig, metadata, abundance_files)
-# txi_sheep <- import_species("Ovis_aries", tx2gene_sheep, metadata, abundance_files)
 
 saveRDS(txi_mouse, "txi_mouse.rds")
 saveRDS(txi_pig, "txi_pig.rds")
-# saveRDS(txi_sheep, "txi_sheep.rds")
-
 ```
-
-```{r sheep older version}
-
-# library(rtracklayer)
-# library(dplyr)
-# 
-# gtf <- import("/Users/mnyamari/Downloads/ncbi_dataset/ncbi_dataset/data/GCF_000298735.1/Ovis_aries.Oar_v3.1.89.gtf.gz")
-# gtf_df <- as.data.frame(gtf)
-# 
-# tx2gene_sheep <- gtf_df %>%
-#   filter(type == "transcript") %>%
-#   dplyr::select(transcript_id, gene_id) %>%
-#   distinct()
-# 
-# tx2gene_sheep$transcript_id <- sub("\\..*", "", tx2gene_sheep$transcript_id)
-# tx2gene_sheep$gene_id <- sub("\\..*", "", tx2gene_sheep$gene_id)
-# 
-# head(tx2gene_sheep)
-# nrow(tx2gene_sheep)
-# 
-# saveRDS(tx2gene_sheep, "tx2gene_sheep_oar3.rds")
-# 
-# txi_sheep <- import_species("Ovis_aries", tx2gene_sheep, metadata, abundance_files)
-# 
-# saveRDS(txi_sheep, "txi_sheep.rds")
-
-```
-
-
 
 ```{r}
 library(DESeq2)
@@ -290,7 +243,6 @@ check_covariates <- function(meta, species_name) {
 }
 
 mouse_cov <- check_covariates(metadata, "Mus_musculus")
-#sheep_cov <- check_covariates(metadata, "Ovis_aries")
 pig_cov   <- check_covariates(metadata, "Sus_scrofa")
 
 ```
@@ -300,8 +252,7 @@ pig_cov   <- check_covariates(metadata, "Sus_scrofa")
 library(DESeq2)
 library(dplyr)
 
-# metadata
-# clean and convert
+# metadata clean and convert
 metadata$sex       <- as.factor(metadata$sex)
 metadata$side      <- as.factor(metadata$side)
 metadata$age_weeks <- scale(as.numeric(metadata$age_weeks))
@@ -312,7 +263,7 @@ prepare_metadata <- function(metadata, species_name) {
   # Filter to species
   meta_sp <- metadata %>% filter(species == species_name)
   
-  # organ viability, >=3 per side
+  # organ viability
   organ_counts <- meta_sp %>%
     group_by(organ_normalized, side) %>%
     summarise(n = n(), .groups = "drop") %>%
@@ -332,9 +283,7 @@ prepare_metadata <- function(metadata, species_name) {
 
 ```
 
-```{r}
-# design formula
-
+```{r design formula}
 build_design <- function(metadata_sp) {
   
   sex_counts <- table(metadata_sp$sex)
@@ -390,7 +339,6 @@ create_dds <- function(metadata_sp, txi_data, design_formula) {
 
 ```
 
-
 ```{r Run DESeq2}
 
 run_deseq <- function(dds) {
@@ -402,7 +350,6 @@ run_deseq <- function(dds) {
 }
 
 ```
-
 
 ```{r results}
 
@@ -493,8 +440,6 @@ saveRDS(results_mouse, "results_mouse.rds")
 meta_pig <- prepare_metadata(metadata, "Sus_scrofa")%>% 
   filter(protocol != "miRNA")
 
-print(table(meta_pig$organ_normalized, meta_pig$side))
-
 # Loop over organs
 organs_pig <- unique(meta_pig$organ_normalized)
 results_pig <- list()
@@ -522,55 +467,6 @@ results_pig <- bind_rows(lapply(results_pig, bind_rows))
 saveRDS(results_pig, "results_pig.rds")
 write.csv(results_pig, "results_pig.csv", row.names = FALSE)
 ```
-
-
-```{r sheep analysis}
-
-# # Prepare metadata
-# meta_sheep <- prepare_metadata(metadata, "Ovis_aries")
-# 
-# print(table(meta_sheep$organ_normalized, meta_sheep$side))
-# 
-# # Loop over organs
-# organs_sheep <- unique(meta_sheep$organ_normalized)
-# results_sheep <- list()
-# 
-# txi_sheep <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/txi_sheep.rds")
-# 
-# for (organ in organs_sheep) {
-#   
-#   meta_sheep_organ <- meta_sheep[meta_sheep$organ_normalized == organ, ]
-#   print(table(meta_sheep_organ$side))
-#   
-#   design_sheep <- build_design(meta_sheep_organ)
-#   dds_sheep <- create_dds(meta_sheep_organ, txi_sheep, design_sheep$formula)
-#   dds_sheep <- run_deseq(dds_sheep)
-#   results_sheep[[organ]] <- extract_results(dds_sheep, "Ovis_aries", organ,
-#                                             design_sheep$use_sex, design_sheep$use_age)
-# }
-# 
-# # results from all organs
-# results_sheep <- bind_rows(lapply(results_sheep, bind_rows))
-# 
-# # Save
-# saveRDS(results_sheep, "results_sheep.rds")
-# write.csv(results_sheep, "results_sheep.csv", row.names = FALSE)
-```
-
-
-```{r combine all results}
-
-all_results <- bind_rows(
-  results_mouse,
-  results_pig
-)
-
-saveRDS(all_results, "all_species_deseq_results.rds")
-
-write.csv(all_results, "all_species_deseq_results.csv", row.names = FALSE)
-
-```
-
 
 
 
