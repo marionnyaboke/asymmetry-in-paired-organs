@@ -3,9 +3,7 @@ title: "Gene Set Enrichment Analysis"
 output: html_notebook
 ---
 
-Which processes are involved in L/R asymmetry, regardless of which side is higher
-
-```{r ranked by absolute effect size}
+```{r}
 library(fgsea)
 library(dplyr)
 library(biomaRt)
@@ -34,7 +32,7 @@ run_tissue_gsea <- function(species_name, organ_name, data, go_cache) {
   ranks <- organ_data %>%
     arrange(desc(abs_log2FC), padj) %>%       
     mutate(abs_log2FC = abs_log2FC + 
-             runif(n(), -1e-10, 1e-10)) %>%      # tiny jitter as last resort
+             runif(n(), -1e-10, 1e-10)) %>% 
     dplyr::select(gene, abs_log2FC) %>%
     deframe()
   
@@ -68,7 +66,6 @@ run_tissue_gsea <- function(species_name, organ_name, data, go_cache) {
 }
 ```
 
-
 ```{r}
 all_results <- bind_rows(
   readRDS("bgee_gtex_combined_model_results.rds"),
@@ -80,7 +77,6 @@ species_organs <- all_results %>%
   filter(variable == "side") %>%
   distinct(species, organ)
 ```
-
 
 ```{r}
 # Pre-fetch GO annotations for all 3 species ONCE before the loop
@@ -109,11 +105,9 @@ for (sp in names(dataset_map)) {
     )
   }
   go_cache[[sp]] <- bind_rows(go_batches)
-  message(sp, ": ", nrow(go_cache[[sp]]), " GO annotations fetched")
 }
 
 ```
-
 
 ```{r run for all tissues}
 all_tissue_gsea <- list()
