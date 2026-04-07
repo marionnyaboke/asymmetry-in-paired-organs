@@ -1,0 +1,93 @@
+---
+title: "PCA human"
+output: html_notebook
+---
+
+```{r}
+txi_data <- readRDS("bgee_gtex_tximport_gene_level.rds")
+sample_metadata_organ <- read.csv("sample_metadata_organ.csv", row.names = 1)
+
+# Extract age 
+if (!"age" %in% colnames(sample_metadata_organ)) {
+  sample_metadata_organ$age <- scale(
+  as.numeric(sub("age: ", "", sample_metadata_organ$infoStage))
+)
+}
+```
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+run_pca_batch_check <- function(organ_name, meta, txi_data) {
+  
+  meta_org <- meta %>% filter(SMTS_refined == organ_name)
+  samples  <- rownames(meta_org)
+  samples  <- samples[samples %in% colnames(txi_data$counts)]
+  meta_org <- meta_org[samples, ]
+  
+  dds <- DESeqDataSetFromTximport(
+    txi = list(
+      counts              = txi_data$counts[, samples],
+      abundance           = txi_data$abundance[, samples],
+      length              = txi_data$length[, samples],
+      countsFromAbundance = txi_data$countsFromAbundance
+    ),
+    colData = meta_org,
+    design  = ~ 1
+  )
+  
+  keep <- rowSums(counts(dds)) >= 10
+  dds  <- dds[keep, ]
+  
+  # VST normalization (blind = TRUE)
+  vsd <- vst(dds, blind = TRUE)
+  
+  # PCA data
+  pca_data    <- plotPCA(vsd, intgroup = "side", returnData = TRUE)
+  percent_var <- round(100 * attr(pca_data, "percentVar"))
+  
+  # Add metadata to PCA data
+  pca_data <- pca_data %>%
+    left_join(meta_org %>% 
+                dplyr::select(SMCENTER, SMGEBTCH, SMNABTCH, platform, sex, age) %>%
+                tibble::rownames_to_column("sample_id"),
+              by = c("name" = "sample_id"))
+  
+  base_plot <- function(color_var, title_suffix) {
+    ggplot(pca_data, aes(PC1, PC2, color = .data[[color_var]])) +
+      geom_point(size = 3, alpha = 0.8) +
+      xlab(paste0("PC1: ", percent_var[1], "% variance")) +
+      ylab(paste0("PC2: ", percent_var[2], "% variance")) +
+      ggtitle(paste0(organ_name, " — ", title_suffix)) +
+      theme_bw() +
+      theme(legend.position = "bottom",
+            legend.text = element_text(size = 7))
+  }
+  
+  p_side    <- base_plot("side",     "Side (L/R)")
+  p_sex     <- base_plot("sex",      "Sex")
+  p_center  <- base_plot("SMCENTER", "Collection Center")
+  p_gebtch  <- base_plot("SMGEBTCH", "Genotype Batch")
+  
+  combined <- (p_side | p_sex) / (p_center | p_gebtch) +
+    plot_annotation(title = organ_name)
+  
+  return(combined)
+}
+
+pdf("pca_batch_check_gtex.pdf", width = 12, height = 10)
+
+organs <- unique(sample_metadata_organ$SMTS_refined)
+
+for (org in organs) {
+  p <- run_pca_batch_check(org, sample_metadata_organ, txi_data)
+  print(p)
+}
+
+dev.off()
+
+```
+
