@@ -1,18 +1,14 @@
 ---
-title: "R Notebook"
+title: "Human DE"
 output: html_notebook
 ---
-
-Linear mixed models assume your response (or dependent) variable is normally distributed. Generalized linear mixed models do not; instead you have to provide a suitable distribution i.e., negative binomial and link function for your data.
 
 ```{r}
 library(DESeq2)
 library(dplyr)
 library(ggplot2)
-# BiocManager::install("apeglm")
 library(apeglm)
 
-# txi_organ <- readRDS("tximport_gene_level.rds")
 txi_organ <- readRDS("bgee_gtex_tximport_gene_level.rds")
 sample_metadata_organ <- read.csv("sample_metadata_organ.csv", row.names = 1)
 
@@ -60,13 +56,6 @@ check_gtex_covariates <- function(meta, organ_name) {
   # Check side
   side_counts <- table(meta_org$side)
   use_side <- length(side_counts) == 2 && all(side_counts >= 3)
-  
-  cat("\n", organ_name, ":\n")
-  cat("  Samples:", nrow(meta_org), "\n")
-  if (is_sex_limited) cat("  Sex-limited organ\n")
-  cat("  Sex usable:", use_sex, "\n")
-  cat("  Age usable:", use_age, "\n")
-  cat("  Side usable:", use_side, "\n")
   
   return(list(use_sex = use_sex, use_age = use_age, use_side = use_side))
 }
@@ -125,11 +114,6 @@ run_gtex_organ <- function(organ_name, meta, txi_data, cov_info) {
   dds <- dds[keep, ]
   
   dds <- DESeq(dds)
-  # dds <- nbinomWaldTest(dds, maxit = 500)
-  
-  n_nonconverged <- sum(!mcols(dds)$betaConv, na.rm = TRUE)
-  if (n_nonconverged > 0) {
-    cat("  Non-converged genes:", n_nonconverged, "\n")
   }
   
   # Check what coefficient names exist
@@ -205,22 +189,4 @@ gtex_results <- bind_rows(lapply(all_gtex_results, bind_rows))
 # Save
 saveRDS(gtex_results, "bgee_gtex_combined_model_results.rds")
 # write.csv(gtex_results, "bgee_gtex_combined_model_results.csv", row.names = FALSE)
-```
-
-
-```{r summary}
-
-summary_gtex <- gtex_results %>%
-  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
-  group_by(organ, variable) %>%
-  summarise(
-    n_genes = n(),
-    mean_log2FC = mean(abs(log2FoldChange)),
-    .groups = "drop"
-  ) %>%
-  arrange(organ, variable)
-
-print(summary_gtex)
-write.csv(summary_gtex, "summary_gtex_combined_model.csv", row.names = FALSE)
-
 ```
