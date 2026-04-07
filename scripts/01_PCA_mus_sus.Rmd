@@ -1,0 +1,147 @@
+---
+title: "PCA for mouse and pig"
+output: html_notebook
+---
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+txi_mouse <- readRDS("txi_mouse.rds")
+txi_pig   <- readRDS("txi_pig.rds")
+
+metadata  <- read.csv("metadata_clean.csv")
+
+prepare_metadata <- function(metadata, species_name) {
+    
+  # Filter to species
+  meta_sp <- metadata %>% filter(species == species_name)
+  
+  # organ viability
+  organ_counts <- meta_sp %>%
+    group_by(organ_normalized, side) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(organ_normalized) %>%
+    filter(n_distinct(side) == 2, all(n >= 3))
+  
+  if (nrow(organ_counts) == 0) {
+    return(NULL)
+  }
+  
+  # Filter to viable organs
+  viable_organs <- unique(organ_counts$organ_normalized)
+  meta_sp <- meta_sp %>% filter(organ_normalized %in% viable_organs)
+  
+  return(meta_sp)
+}
+
+meta_mouse <- prepare_metadata(metadata, "Mus_musculus")
+meta_pig   <- prepare_metadata(metadata, "Sus_scrofa")
+
+```
+
+```{r}
+
+run_pca_bgee <- function(organ_name, meta_sp, txi_data, species_name) {
+  
+  meta_org <- meta_sp %>% filter(organ_normalized == organ_name)
+  samples  <- meta_org$libraryid
+  
+  if (nrow(meta_org) < 3) {
+    return(NULL)
+  }
+  
+  dds <- DESeqDataSetFromTximport(
+    txi = list(
+      counts              = txi_data$counts[, samples],
+      abundance           = txi_data$abundance[, samples],
+      length              = txi_data$length[, samples],
+      countsFromAbundance = txi_data$countsFromAbundance
+    ),
+    colData = meta_org,
+    design  = ~ 1
+  )
+  
+  keep <- rowSums(counts(dds)) >= 10
+  dds  <- dds[keep, ]
+  
+  vsd <- vst(dds, blind = TRUE)
+  
+  # Get PCA data
+  pca_data    <- plotPCA(vsd, intgroup = "side", returnData = TRUE)
+  percent_var <- round(100 * attr(pca_data, "percentVar"))
+  
+  # Join metadata 
+  pca_data <- pca_data %>%
+    left_join(
+      meta_org %>% 
+        dplyr::select(libraryid, 
+                      side_meta = side,
+                      sex, 
+                      age_weeks,
+                      experimentid, 
+                      platformid, 
+                      protocol, 
+                      librarytype,
+                      maxreadlength),
+      by = c("name" = "libraryid")
+    )
+  
+  base_plot <- function(color_var, title_suffix) {
+    if (!color_var %in% colnames(pca_data)) return(NULL)
+    if (length(unique(na.omit(pca_data[[color_var]]))) < 2) return(NULL)
+    
+    ggplot(pca_data, aes(PC1, PC2, color = as.factor(.data[[color_var]]))) +
+      geom_point(size = 3, alpha = 0.8) +
+      xlab(paste0("PC1: ", percent_var[1], "% variance")) +
+      ylab(paste0("PC2: ", percent_var[2], "% variance")) +
+      ggtitle(paste0(organ_name, " — ", title_suffix)) +
+      theme_bw() +
+      theme(legend.position = "bottom",
+            legend.text     = element_text(size = 7)) +
+      labs(color = title_suffix)
+  }
+  
+  p_side     <- base_plot("side_meta",   "Side (L/R)")
+  p_sex      <- base_plot("sex",         "Sex")
+  p_expt     <- base_plot("experimentid","Experiment")
+  p_platform <- base_plot("platformid",  "Platform")
+  p_protocol <- base_plot("protocol",    "Protocol")
+  p_libtype  <- base_plot("librarytype", "Library Type")
+  p_readlen   <- base_plot("maxreadlength","Read Length") 
+  
+  # Combine only non-null plots
+  plots <- Filter(Negate(is.null), 
+                  list(p_side, p_sex, p_expt, p_platform, 
+                       p_protocol, p_libtype, p_readlen)) 
+  
+  if (length(plots) == 0) return(NULL)
+  
+  combined <- wrap_plots(plots, ncol = 2) +
+    plot_annotation(title = paste(species_name, "-", organ_name))
+  
+  return(combined)
+}
+
+# run all species
+
+species_list <- list(
+  list(name = "Mus_musculus", meta = meta_mouse, txi = txi_mouse),
+  list(name = "Sus_scrofa",   meta = meta_pig,   txi = txi_pig)
+)
+
+pdf("pca_batch_check_bgee.pdf", width = 12, height = 10)
+
+for (sp in species_list) {
+  for (org in unique(sp$meta$organ_normalized)) {
+    p <- run_pca_bgee(org, sp$meta, sp$txi, sp$name)
+    if (!is.null(p)) print(p)
+  }
+}
+
+dev.off()
+
+```
+
