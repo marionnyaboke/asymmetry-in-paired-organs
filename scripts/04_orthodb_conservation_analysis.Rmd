@@ -15,7 +15,7 @@ mouse_rds <- "results_mouse.rds"
 pig_rds   <- "results_pig.rds"
 
 #OrthoDB download directory 
-orthodb_dir <- "/Users/mnyamari/Desktop/GTEx/variance-decomp/orthodb_data"
+orthodb_dir <- "orthodb_data"
 dir.create(orthodb_dir, showWarnings = FALSE)
 
 padj_cutoff  <- 0.05
