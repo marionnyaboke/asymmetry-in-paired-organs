@@ -1,0 +1,141 @@
+---
+title: "Gene Set Enrichment Analysis"
+output: html_notebook
+---
+
+Which processes are involved in L/R asymmetry, regardless of which side is higher
+
+```{r ranked by absolute effect size}
+library(fgsea)
+library(dplyr)
+library(biomaRt)
+library(ggplot2)
+library(pheatmap)
+library(tidyr)
+library(tibble)
+library(patchwork)
+
+run_tissue_gsea <- function(species_name, organ_name, data, go_cache) {
+  
+  organ_data <- data %>%
+    filter(species == species_name, organ == organ_name, variable == "side") %>%
+    filter(!is.na(log2FoldChange), is.finite(log2FoldChange), !is.na(padj)) %>% 
+    group_by(gene) %>%
+    summarise(
+      log2FC = mean(log2FoldChange, na.rm = TRUE),
+      padj   = mean(padj, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(abs_log2FC = abs(log2FC))
+  
+  if (nrow(organ_data) < 100) return(NULL)
+  
+  # sort by absolute log2FC and padj
+  ranks <- organ_data %>%
+    arrange(desc(abs_log2FC), padj) %>%       
+    mutate(abs_log2FC = abs_log2FC + 
+             runif(n(), -1e-10, 1e-10)) %>%      # tiny jitter as last resort
+    dplyr::select(gene, abs_log2FC) %>%
+    deframe()
+  
+  # Use cached GO annotations
+  go_data <- go_cache[[species_name]] %>%
+    filter(ensembl_gene_id %in% names(ranks))
+  
+  if (nrow(go_data) == 0) return(NULL)
+  
+  pathways <- go_data %>%
+    filter(namespace_1003 == "biological_process",
+           go_id != "", name_1006 != "") %>%
+    group_by(name_1006) %>%
+    summarise(genes = list(unique(ensembl_gene_id)), .groups = "drop") %>%
+    filter(lengths(genes) >= 15, lengths(genes) <= 500) %>%
+    deframe()
+  
+  gsea_result <- fgsea(
+    pathways  = pathways,
+    stats     = ranks,
+    minSize   = 15,
+    maxSize   = 500,
+    scoreType = "pos",
+    nPermSimple = 10000,
+    eps = 0.0
+  )
+  
+  gsea_result$species <- species_name
+  gsea_result$organ   <- organ_name
+  return(gsea_result)
+}
+```
+
+
+```{r}
+all_results <- bind_rows(
+  readRDS("bgee_gtex_combined_model_results.rds"),
+  readRDS("results_mouse.rds"),
+  readRDS("results_pig.rds"),
+)
+
+species_organs <- all_results %>%
+  filter(variable == "side") %>%
+  distinct(species, organ)
+```
+
+
+```{r}
+# Pre-fetch GO annotations for all 3 species ONCE before the loop
+go_cache <- list()
+dataset_map <- c(
+  "Homo_sapiens" = "hsapiens_gene_ensembl",
+  "Mus_musculus" = "mmusculus_gene_ensembl",
+  "Sus_scrofa"   = "sscrofa_gene_ensembl"
+)
+
+for (sp in names(dataset_map)) {
+  mart      <- useEnsembl("genes", dataset = dataset_map[sp], mirror  = "useast")
+  all_genes <- all_results %>% filter(species == sp) %>% pull(gene) %>% unique()
+  
+  batch_size <- 5000
+  n_batches  <- ceiling(length(all_genes) / batch_size)
+  go_batches <- list()
+  
+  for (i in 1:n_batches) {
+    batch_genes  <- all_genes[((i-1)*batch_size + 1) : min(i*batch_size, length(all_genes))]
+    go_batches[[i]] <- getBM(
+      attributes = c("ensembl_gene_id", "go_id", "name_1006", "namespace_1003"),
+      filters    = "ensembl_gene_id",
+      values     = batch_genes,
+      mart       = mart
+    )
+  }
+  go_cache[[sp]] <- bind_rows(go_batches)
+  message(sp, ": ", nrow(go_cache[[sp]]), " GO annotations fetched")
+}
+
+```
+
+
+```{r run for all tissues}
+all_tissue_gsea <- list()
+for (i in 1:nrow(species_organs)) {
+  result <- tryCatch(
+    run_tissue_gsea(species_organs$species[i], 
+                    species_organs$organ[i], 
+                    all_results,
+                    go_cache),  
+    error = function(e) NULL
+  )
+  if (!is.null(result)) all_tissue_gsea[[i]] <- result
+}
+
+all_tissue_gsea <- all_tissue_gsea[!sapply(all_tissue_gsea, is.null)]
+all_gsea <- bind_rows(all_tissue_gsea)
+
+all_gsea_save <- all_gsea %>%
+  mutate(across(where(is.list), ~ sapply(., function(x) paste(x, collapse = ";"))))
+write.csv(all_gsea_save, "31-03-tissue_specific_gsea.csv", row.names = FALSE)
+
+nrow(all_gsea)
+sum(all_gsea$padj < 0.05, na.rm = TRUE)
+```
+
