@@ -1,0 +1,576 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(data.table)
+
+setwd("/Users/mnyamari/Desktop/GTEx/variance-decomp")
+
+metadata <- read.csv("Metadata_full.csv")
+colnames(metadata)
+nrow(metadata)
+
+# Clean column names
+colnames(metadata) <- gsub(" ", "_", colnames(metadata)) 
+colnames(metadata) <- gsub("[^A-Za-z0-9_]", "", colnames(metadata)) 
+colnames(metadata) <- tolower(colnames(metadata)) 
+
+colnames(metadata)
+
+# extract side 
+metadata$side <- NA
+
+if ("anatomicalentityauthorannotation" %in% colnames(metadata)) {
+  metadata$side[grepl("left", metadata$anatomicalentityauthorannotation, ignore.case = TRUE)] <- "L"
+  metadata$side[grepl("right", metadata$anatomicalentityauthorannotation, ignore.case = TRUE)] <- "R"
+}
+
+if ("anatomicalentityname" %in% colnames(metadata)) {
+  na_indices <- is.na(metadata$side)
+  metadata$side[na_indices & grepl("left", metadata$anatomicalentityname, ignore.case = TRUE)] <- "L"
+  metadata$side[na_indices & grepl("right", metadata$anatomicalentityname, ignore.case = TRUE)] <- "R"
+}
+
+if ("expressionmappedanatomicalentity_name" %in% colnames(metadata)) {
+  na_indices <- is.na(metadata$side)
+  metadata$side[na_indices & grepl("left", metadata$expressionmappedanatomicalentityname, ignore.case = TRUE)] <- "L"
+  metadata$side[na_indices & grepl("right", metadata$expressionmappedanatomicalentityname, ignore.case = TRUE)] <- "R"
+}
+
+table(metadata$side, useNA = "ifany")
+table(metadata$species, metadata$side, useNA = "ifany")
+
+# Create normalized organ column
+metadata$organ_normalized <- metadata$anatomicalentityname
+
+# Remove left/right patterns
+metadata$organ_normalized <- gsub("left ", "", metadata$organ_normalized, ignore.case = TRUE)
+metadata$organ_normalized <- gsub("right ", "", metadata$organ_normalized, ignore.case = TRUE)
+metadata$organ_normalized <- gsub(" left", "", metadata$organ_normalized, ignore.case = TRUE)
+metadata$organ_normalized <- gsub(" right", "", metadata$organ_normalized, ignore.case = TRUE)
+metadata$organ_normalized <- trimws(metadata$organ_normalized)
+
+write.csv(metadata, "metadata_clean.csv", row.names = FALSE)
+
+metadata$organ <- metadata$organ_normalized
+
+sample_counts <- metadata %>%
+  group_by(species, organ, side) %>%
+  summarise(n = n(), .groups = "drop")
+print(sample_counts)
+
+```
+
+
+```{r}
+
+# Get sample IDs from metadata
+sample_ids <- metadata$libraryid
+
+kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/kallisto_out"
+missing_files <- c()
+
+for (id in sample_ids) {
+  abundance_file <- file.path(kallisto_dir, id, "abundance.tsv")
+  if (!file.exists(abundance_file)) {
+    missing_files <- c(missing_files, id)
+  }
+}
+
+length(missing_files)
+
+```
+
+
+```{r age and sex}
+
+if ("stageauthorannotation" %in% colnames(metadata)) {
+  print(summary(metadata$stageauthorannotation))
+} 
+
+print(unique(metadata$stageauthorannotation))
+
+# Extract numeric age and convert to a consistent unit
+extract_age <- function(age_string) {
+  if (is.na(age_string) || age_string == "") return(NA)
+  
+  # Extract numbers
+  numbers <- as.numeric(unlist(regmatches(age_string, gregexpr("[0-9]+", age_string))))
+  
+  if (length(numbers) == 0) return(NA)
+  
+  # Take midpoint if range, otherwise take the single value
+  age_value <- if (length(numbers) == 2) mean(numbers) else numbers[1]
+  
+  # Convert to weeks
+  if (grepl("week", age_string, ignore.case = TRUE)) {
+    return(age_value)
+  } else if (grepl("month", age_string, ignore.case = TRUE)) {
+    return(age_value * 4.3) 
+  } else if (grepl("year", age_string, ignore.case = TRUE)) {
+    return(age_value * 52) 
+  } else if (grepl("day", age_string, ignore.case = TRUE)) {
+    return(age_value / 7) 
+  } else {
+    return(age_value)
+  }
+}
+
+# Apply to all samples
+metadata$age_weeks <- sapply(metadata$stageauthorannotation, extract_age)
+summary(metadata$age_weeks)
+
+# age by species
+age_summary <- metadata %>%
+  group_by(species) %>%
+  summarise(
+    n = n(),
+    min_age = min(age_weeks, na.rm = TRUE),
+    max_age = max(age_weeks, na.rm = TRUE),
+    mean_age = mean(age_weeks, na.rm = TRUE),
+    has_age = sum(!is.na(age_weeks))
+  )
+
+print(age_summary)
+
+# Save
+write.csv(metadata, "metadata_clean.csv", row.names = FALSE)
+
+```
+
+```{r}
+library(tximport)
+library(biomaRt)
+library(dplyr)
+
+kallisto_dir <- "/Users/mnyamari/Desktop/GTEx/kallisto_out"
+
+# Get sample IDs from metadata
+sample_ids <- metadata$libraryid
+
+# file paths
+abundance_files <- file.path(kallisto_dir, sample_ids, "abundance.tsv")
+names(abundance_files) <- sample_ids
+missing <- abundance_files[!file.exists(abundance_files)]
+
+create_tx2gene <- function(species_name) {
+  
+  # Map species names to Ensembl dataset names
+  dataset_map <- c(
+    "Mus_musculus" = "mmusculus_gene_ensembl",
+    "Sus_scrofa" = "sscrofa_gene_ensembl",
+    "Ovis_aries" = "oaries_gene_ensembl"
+  )
+  
+  dataset <- dataset_map[species_name]
+  
+  if (is.na(dataset)) {
+    stop("Unknown species: ", species_name)
+  }
+  
+  # Connect to Ensembl
+  ensembl <- useEnsembl(biomart = "genes", dataset = dataset)
+  
+  # Get transcript to gene mapping
+  tx2gene <- getBM(
+    attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+    mart = ensembl
+  )
+  
+  colnames(tx2gene) <- c("transcript_id", "gene_id")
+  
+  cat("  Retrieved", nrow(tx2gene), "transcript-gene mappings\n")
+  
+  return(tx2gene)
+}
+
+# Create tx2gene for each species
+tx2gene_mouse <- create_tx2gene("Mus_musculus")
+tx2gene_pig <- create_tx2gene("Sus_scrofa")
+#tx2gene_sheep <- create_tx2gene("Ovis_aries")
+
+tx2gene_mouse$transcript_id <- sub("\\..*", "", tx2gene_mouse$transcript_id)
+tx2gene_pig$transcript_id <- sub("\\..*", "", tx2gene_pig$transcript_id)
+#tx2gene_sheep$transcript_id <- sub("\\..*", "", tx2gene_sheep$transcript_id)
+
+saveRDS(tx2gene_mouse, "tx2gene_mouse.rds")
+saveRDS(tx2gene_pig, "tx2gene_pig.rds")
+#saveRDS(tx2gene_sheep, "tx2gene_sheep.rds")
+
+```
+
+
+```{r Import with tximport}
+
+# tx2gene_mouse <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_mouse.rds")
+# tx2gene_pig <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_pig.rds")
+# tx2gene_sheep <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/tx2gene_sheep.rds")
+
+import_species <- function(species_name, tx2gene, metadata, files) {
+  
+  # Get samples for this species
+  species_samples <- metadata$libraryid[metadata$species == species_name]
+  species_files <- files[species_samples]
+  
+  cat(length(species_files))
+  
+  # Import
+  txi <- tximport(
+    files = species_files,
+    type = "kallisto",
+    tx2gene = tx2gene,
+    countsFromAbundance = "no",
+    ignoreTxVersion = TRUE
+  )
+  
+  cat(nrow(txi$counts))
+  
+  return(txi)
+}
+
+txi_mouse <- import_species("Mus_musculus", tx2gene_mouse, metadata, abundance_files)
+txi_pig <- import_species("Sus_scrofa", tx2gene_pig, metadata, abundance_files)
+# txi_sheep <- import_species("Ovis_aries", tx2gene_sheep, metadata, abundance_files)
+
+saveRDS(txi_mouse, "txi_mouse.rds")
+saveRDS(txi_pig, "txi_pig.rds")
+# saveRDS(txi_sheep, "txi_sheep.rds")
+
+```
+
+```{r sheep older version}
+
+# library(rtracklayer)
+# library(dplyr)
+# 
+# gtf <- import("/Users/mnyamari/Downloads/ncbi_dataset/ncbi_dataset/data/GCF_000298735.1/Ovis_aries.Oar_v3.1.89.gtf.gz")
+# gtf_df <- as.data.frame(gtf)
+# 
+# tx2gene_sheep <- gtf_df %>%
+#   filter(type == "transcript") %>%
+#   dplyr::select(transcript_id, gene_id) %>%
+#   distinct()
+# 
+# tx2gene_sheep$transcript_id <- sub("\\..*", "", tx2gene_sheep$transcript_id)
+# tx2gene_sheep$gene_id <- sub("\\..*", "", tx2gene_sheep$gene_id)
+# 
+# head(tx2gene_sheep)
+# nrow(tx2gene_sheep)
+# 
+# saveRDS(tx2gene_sheep, "tx2gene_sheep_oar3.rds")
+# 
+# txi_sheep <- import_species("Ovis_aries", tx2gene_sheep, metadata, abundance_files)
+# 
+# saveRDS(txi_sheep, "txi_sheep.rds")
+
+```
+
+
+
+```{r}
+library(DESeq2)
+library(dplyr)
+
+check_covariates <- function(meta, species_name) {
+  meta_sp <- meta %>% filter(species == species_name)
+  
+  # Sex: at least 2 levels with >=3 samples each
+  sex_counts <- table(meta_sp$sex)
+  use_sex <- length(sex_counts) >= 2 && all(sex_counts >= 3)
+  
+  # Age: continuous
+  age_vals <- meta_sp$age_weeks[!is.na(meta_sp$age_weeks)]
+  use_age  <- length(age_vals) >= 10 && 
+              length(unique(age_vals)) >= 5
+  
+  return(list(use_sex = use_sex, use_age = use_age))
+}
+
+mouse_cov <- check_covariates(metadata, "Mus_musculus")
+#sheep_cov <- check_covariates(metadata, "Ovis_aries")
+pig_cov   <- check_covariates(metadata, "Sus_scrofa")
+
+```
+
+
+```{r}
+library(DESeq2)
+library(dplyr)
+
+# metadata
+# clean and convert
+metadata$sex       <- as.factor(metadata$sex)
+metadata$side      <- as.factor(metadata$side)
+metadata$age_weeks <- scale(as.numeric(metadata$age_weeks))
+metadata$maxreadlength <- as.factor(metadata$maxreadlength)
+
+prepare_metadata <- function(metadata, species_name) {
+  
+  # Filter to species
+  meta_sp <- metadata %>% filter(species == species_name)
+  
+  # organ viability, >=3 per side
+  organ_counts <- meta_sp %>%
+    group_by(organ_normalized, side) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(organ_normalized) %>%
+    filter(n_distinct(side) == 2, all(n >= 6))
+  
+  if (nrow(organ_counts) == 0) {
+    return(NULL)
+  }
+  
+  # Filter to viable organs
+  viable_organs <- unique(organ_counts$organ_normalized)
+  meta_sp <- meta_sp %>% filter(organ_normalized %in% viable_organs)
+  
+  return(meta_sp)
+}
+
+```
+
+```{r}
+# design formula
+
+build_design <- function(metadata_sp) {
+  
+  sex_counts <- table(metadata_sp$sex)
+  use_sex <- length(sex_counts) >= 2 && all(sex_counts >= 3)
+  
+  # age check 
+  age_vals <- metadata_sp$age_weeks[!is.na(metadata_sp$age_weeks)]
+  use_age  <- length(age_vals) >= 10 && 
+              length(unique(age_vals)) >= 5
+  
+  # Add read length check
+  readlength_counts <- table(droplevels(as.factor(metadata_sp$maxreadlength)))
+  use_readlength <- length(readlength_counts) >= 2 && 
+                    all(readlength_counts >= 3)
+  
+  design_terms <- "side"
+  if (use_age)       design_terms <- c("age_weeks",     design_terms)
+  if (use_sex)       design_terms <- c("sex",           design_terms)
+  if (use_readlength) design_terms <- c("maxreadlength", design_terms)
+  
+  design_formula <- as.formula(paste("~", paste(design_terms, collapse = " + ")))
+  
+  return(list(formula    = design_formula, 
+              use_sex    = use_sex, 
+              use_age    = use_age,
+              use_readlength = use_readlength))
+}
+```
+
+
+```{r DESeq2 object}
+
+create_dds <- function(metadata_sp, txi_data, design_formula) {
+  
+  # Get sample IDs
+  samples <- metadata_sp$libraryid
+  rownames(metadata_sp) <- metadata_sp$libraryid
+  
+  # Create object
+  dds <- DESeqDataSetFromTximport(
+    txi = list(
+      counts = txi_data$counts[, samples],
+      abundance = txi_data$abundance[, samples],
+      length = txi_data$length[, samples],
+      countsFromAbundance = txi_data$countsFromAbundance
+    ),
+    colData = metadata_sp,
+    design = design_formula
+  )
+  
+  return(dds)
+}
+
+```
+
+
+```{r Run DESeq2}
+
+run_deseq <- function(dds) {
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep, ]
+  dds <- DESeq(dds)
+  # dds <- nbinomWaldTest(dds, maxit = 500)
+  return(dds)
+}
+
+```
+
+
+```{r results}
+
+extract_results <- function(dds, species_name, organ_name, use_sex, use_age) {
+  
+  results_list <- list()
+  
+  # if side in model
+  # res_side <- results(dds, name = "side_R_vs_L")
+  res_side <- lfcShrink(dds, coef = "side_R_vs_L", type = "apeglm")
+  n_sig <- sum(res_side$padj < 0.05, na.rm = TRUE)
+  
+  results_list[["side"]] <- as.data.frame(res_side) %>%
+    mutate(gene = rownames(res_side),
+           variable = "side",
+           species = species_name,
+           organ = organ_name) %>%
+    dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+  
+  # if age in model
+  if (use_age) {
+    # res_age <- results(dds, name = "age_weeks")
+    res_age <- lfcShrink(dds, coef = "age_weeks", type = "apeglm")
+    n_sig <- sum(res_age$padj < 0.05, na.rm = TRUE)
+
+    results_list[["age"]] <- as.data.frame(res_age) %>%
+      mutate(gene = rownames(res_age),
+             variable = "age",
+             species = species_name,
+             organ = organ_name) %>% 
+      dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+  }
+  
+  # if sex in model
+  if (use_sex) {
+    res_sex <- results(dds, name = "sex_male_vs_female")
+    n_sig <- sum(res_sex$padj < 0.05, na.rm = TRUE)
+    cat("  Sex:", n_sig, "significant genes\n")
+    
+    results_list[["sex"]] <- as.data.frame(res_sex) %>%
+      mutate(gene = rownames(res_sex),
+             variable = "sex",
+             species = species_name,
+             organ = organ_name) %>%
+      dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+  }
+  
+  return(results_list)
+}
+
+```
+
+```{r analysis - mouse}
+
+meta_mouse <- prepare_metadata(metadata, "Mus_musculus")
+
+print(table(meta_mouse$organ_normalized))
+
+organs <- unique(meta_mouse$organ_normalized)
+results_mouse <- list()
+
+# loop over organs
+for (organ in organs) {
+  
+  meta_mouse_organ <- meta_mouse[meta_mouse$organ_normalized == organ, ]
+  design_mouse <- build_design(meta_mouse_organ)
+  
+  cat("Organ:", organ, "\n")
+  cat("Design:", as.character(design_mouse$formula), "\n")
+  
+  dds_mouse <- create_dds(meta_mouse_organ, txi_mouse, design_mouse$formula)
+  dds_mouse <- run_deseq(dds_mouse)
+  results_mouse[[organ]] <- extract_results(dds_mouse, "Mus_musculus", organ,
+                                            design_mouse$use_sex, design_mouse$use_age)
+}
+
+
+# results from all organs
+results_mouse <- bind_rows(lapply(results_mouse, bind_rows))
+
+saveRDS(results_mouse, "results_mouse.rds")
+
+```
+
+```{r analysis - pig}
+
+# Prepare metadata
+meta_pig <- prepare_metadata(metadata, "Sus_scrofa")%>% 
+  filter(protocol != "miRNA")
+
+print(table(meta_pig$organ_normalized, meta_pig$side))
+
+# Loop over organs
+organs_pig <- unique(meta_pig$organ_normalized)
+results_pig <- list()
+
+for (organ in organs_pig) {
+  
+  meta_pig_organ <- meta_pig[meta_pig$organ_normalized == organ, ]
+  
+  nrow(meta_pig_organ)
+  print(table(meta_pig_organ$side))
+  design_pig <- build_design(meta_pig_organ)
+  
+  cat("Organ:", organ, "\n")
+  cat("Design:", as.character(design_pig$formula), "\n")
+  
+  dds_pig <- create_dds(meta_pig_organ, txi_pig, design_pig$formula)
+  dds_pig <- run_deseq(dds_pig)
+  results_pig[[organ]] <- extract_results(dds_pig, "Sus_scrofa", organ,
+                                          design_pig$use_sex, design_pig$use_age)
+}
+
+# results from all organs
+results_pig <- bind_rows(lapply(results_pig, bind_rows))
+
+saveRDS(results_pig, "results_pig.rds")
+write.csv(results_pig, "results_pig.csv", row.names = FALSE)
+```
+
+
+```{r sheep analysis}
+
+# # Prepare metadata
+# meta_sheep <- prepare_metadata(metadata, "Ovis_aries")
+# 
+# print(table(meta_sheep$organ_normalized, meta_sheep$side))
+# 
+# # Loop over organs
+# organs_sheep <- unique(meta_sheep$organ_normalized)
+# results_sheep <- list()
+# 
+# txi_sheep <- readRDS("/Users/mnyamari/Desktop/GTEx/variance-decomp/txi_sheep.rds")
+# 
+# for (organ in organs_sheep) {
+#   
+#   meta_sheep_organ <- meta_sheep[meta_sheep$organ_normalized == organ, ]
+#   print(table(meta_sheep_organ$side))
+#   
+#   design_sheep <- build_design(meta_sheep_organ)
+#   dds_sheep <- create_dds(meta_sheep_organ, txi_sheep, design_sheep$formula)
+#   dds_sheep <- run_deseq(dds_sheep)
+#   results_sheep[[organ]] <- extract_results(dds_sheep, "Ovis_aries", organ,
+#                                             design_sheep$use_sex, design_sheep$use_age)
+# }
+# 
+# # results from all organs
+# results_sheep <- bind_rows(lapply(results_sheep, bind_rows))
+# 
+# # Save
+# saveRDS(results_sheep, "results_sheep.rds")
+# write.csv(results_sheep, "results_sheep.csv", row.names = FALSE)
+```
+
+
+```{r combine all results}
+
+all_results <- bind_rows(
+  results_mouse,
+  results_pig
+)
+
+saveRDS(all_results, "all_species_deseq_results.rds")
+
+write.csv(all_results, "all_species_deseq_results.csv", row.names = FALSE)
+
+```
+
+
+
+
