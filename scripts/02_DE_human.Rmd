@@ -1,0 +1,226 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Linear mixed models assume your response (or dependent) variable is normally distributed. Generalized linear mixed models do not; instead you have to provide a suitable distribution i.e., negative binomial and link function for your data.
+
+```{r}
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+# BiocManager::install("apeglm")
+library(apeglm)
+
+# txi_organ <- readRDS("tximport_gene_level.rds")
+txi_organ <- readRDS("bgee_gtex_tximport_gene_level.rds")
+sample_metadata_organ <- read.csv("sample_metadata_organ.csv", row.names = 1)
+
+# Remove missing samples from metadata
+samples_to_remove <- c("SRX199102", "SRX203502", "SRX203861", "SRX203933",
+                       "SRX204005", "SRX204033", "SRX204068", "SRX204072")
+
+sample_metadata_organ <- sample_metadata_organ %>%
+  filter(!rownames(.) %in% samples_to_remove)
+
+
+# Extract age 
+if (!"age" %in% colnames(sample_metadata_organ)) {
+  sample_metadata_organ$age <- scale(
+  as.numeric(sub("age: ", "", sample_metadata_organ$infoStage))
+)
+}
+
+sample_metadata_organ$sex     <- as.factor(sample_metadata_organ$sex)
+sample_metadata_organ$side    <- as.factor(sample_metadata_organ$side)
+sample_metadata_organ$SMCENTER <- as.factor(sample_metadata_organ$SMCENTER)
+
+
+nrow(sample_metadata_organ)
+unique(sample_metadata_organ$SMTS_refined)
+```
+
+
+```{r check covariates}
+
+check_gtex_covariates <- function(meta, organ_name) {
+  meta_org <- meta %>% filter(SMTS_refined == organ_name)
+  
+  # Sex-limited organs
+  is_sex_limited <- organ_name %in% c("Testis", "Ovary")
+  
+  # Check sex
+  sex_counts <- table(meta_org$sex)
+  use_sex <- !is_sex_limited && length(sex_counts) >= 2 && all(sex_counts >= 3)
+  
+  # Check age
+  use_age <- !all(is.na(meta_org$age)) && 
+             length(unique(meta_org$age[!is.na(meta_org$age)])) > 1
+  
+  # Check side
+  side_counts <- table(meta_org$side)
+  use_side <- length(side_counts) == 2 && all(side_counts >= 3)
+  
+  cat("\n", organ_name, ":\n")
+  cat("  Samples:", nrow(meta_org), "\n")
+  if (is_sex_limited) cat("  Sex-limited organ\n")
+  cat("  Sex usable:", use_sex, "\n")
+  cat("  Age usable:", use_age, "\n")
+  cat("  Side usable:", use_side, "\n")
+  
+  return(list(use_sex = use_sex, use_age = use_age, use_side = use_side))
+}
+
+organs <- unique(sample_metadata_organ$SMTS_refined)
+covariate_info <- list()
+
+for (org in organs) {
+  covariate_info[[org]] <- check_gtex_covariates(sample_metadata_organ, org)
+}
+```
+
+```{r DESeq2 per organ}
+
+run_gtex_organ <- function(organ_name, meta, txi_data, cov_info) {
+  
+  # Filter organ
+  meta_org <- meta %>% filter(SMTS_refined == organ_name)
+  meta_org$SMCENTER <- as.factor(meta_org$SMCENTER)
+  samples <- rownames(meta_org)
+  
+  # Build design
+  design_terms <- c()
+  if (cov_info$use_age) design_terms <- c(design_terms, "age")
+  if (cov_info$use_sex) design_terms <- c(design_terms, "sex")
+  center_counts <- table(meta_org$SMCENTER)
+  use_center <- length(center_counts) >= 2 && 
+              nrow(meta_org) >= 10
+  if (use_center) {
+    design_terms <- c(design_terms, "SMCENTER") 
+    }
+  if (cov_info$use_side) design_terms <- c(design_terms, "side")
+  
+  if (length(design_terms) == 0) {
+    return(NULL)
+  }
+  
+  design_formula <- as.formula(paste("~", paste(design_terms, collapse = " + ")))
+  cat("Design:", as.character(design_formula), "\n")
+  cat("Samples:", nrow(meta_org), "\n")
+  
+  # Create DESeq2 object
+  dds <- DESeqDataSetFromTximport(
+    txi = list(
+      counts = txi_data$counts[, samples],
+      abundance = txi_data$abundance[, samples],
+      length = txi_data$length[, samples],
+      countsFromAbundance = txi_data$countsFromAbundance
+    ),
+    colData = meta_org,
+    design = design_formula
+  )
+  
+  # Run DESeq2
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep, ]
+  
+  dds <- DESeq(dds)
+  # dds <- nbinomWaldTest(dds, maxit = 500)
+  
+  n_nonconverged <- sum(!mcols(dds)$betaConv, na.rm = TRUE)
+  if (n_nonconverged > 0) {
+    cat("  Non-converged genes:", n_nonconverged, "\n")
+  }
+  
+  # Check what coefficient names exist
+  cat("Available coefficients:", paste(resultsNames(dds), collapse = ", "), "\n")
+  
+  # Extract results for each coefficient with LFCshrinkage
+  results_list <- list()
+  
+  # Side (if in model)
+  if (cov_info$use_side) {
+    res_side <- lfcShrink(dds, coef = "side_R_vs_L", type = "apeglm") 
+    n_sig <- sum(res_side$padj < 0.05, na.rm = TRUE)
+    cat("  Side:", n_sig, "significant genes\n")
+    
+    results_list[["side"]] <- as.data.frame(res_side) %>%
+      mutate(gene = rownames(res_side),
+             variable = "side",
+             species = "Homo_sapiens",
+             organ = organ_name) %>%
+      dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+  }
+  
+  # Age (if in model)
+  if (cov_info$use_age) {
+    res_age <- lfcShrink(dds, coef = "age", type = "apeglm")
+    n_sig <- sum(res_age$padj < 0.05, na.rm = TRUE)
+    cat("  Age:", n_sig, "significant genes\n")
+    
+    results_list[["age"]] <- as.data.frame(res_age) %>%
+      mutate(gene = rownames(res_age),
+             variable = "age",
+             species = "Homo_sapiens",
+             organ = organ_name) %>%
+      dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+  }
+  
+  # Sex (if in model)
+  if (cov_info$use_sex) {
+    sex_coef <- resultsNames(dds)[grepl("sex", resultsNames(dds), ignore.case = TRUE)]
+    if (length(sex_coef) > 0) {
+      res_sex <- lfcShrink(dds, coef = sex_coef[1], type = "apeglm")
+      n_sig <- sum(res_sex$padj < 0.05, na.rm = TRUE)
+      cat("  Sex:", n_sig, "significant genes\n")
+      
+      results_list[["sex"]] <- as.data.frame(res_sex) %>%
+        mutate(gene = rownames(res_sex),
+               variable = "sex",
+               species = "Homo_sapiens",
+               organ = organ_name) %>%
+        dplyr::select(species, organ, variable, gene, log2FoldChange, pvalue, padj)
+    }
+  }
+  
+  return(results_list)
+}
+```
+
+
+```{r Run for all organs}
+
+all_gtex_results <- list()
+
+for (org in organs) {
+  results <- run_gtex_organ(org, sample_metadata_organ, txi_organ, covariate_info[[org]])
+  if (!is.null(results)) {
+    all_gtex_results[[org]] <- results
+  }
+}
+
+# Combine all results
+gtex_results <- bind_rows(lapply(all_gtex_results, bind_rows))
+
+# Save
+saveRDS(gtex_results, "bgee_gtex_combined_model_results.rds")
+# write.csv(gtex_results, "bgee_gtex_combined_model_results.csv", row.names = FALSE)
+```
+
+
+```{r summary}
+
+summary_gtex <- gtex_results %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  group_by(organ, variable) %>%
+  summarise(
+    n_genes = n(),
+    mean_log2FC = mean(abs(log2FoldChange)),
+    .groups = "drop"
+  ) %>%
+  arrange(organ, variable)
+
+print(summary_gtex)
+write.csv(summary_gtex, "summary_gtex_combined_model.csv", row.names = FALSE)
+
+```
