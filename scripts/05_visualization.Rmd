@@ -276,10 +276,11 @@ p3_total <- side_degs %>%
   mutate(
     binom_p = mapply(function(r, total) binom.test(r, total, p = 0.5)$p.value,
                      n_right, n_total),
+    binom_padj = p.adjust(binom_p, method = "BH"),
     sig_label = case_when(
-      binom_p < 0.001 ~ "***",
-      binom_p < 0.01  ~ "**",
-      binom_p < 0.05  ~ "*",
+      binom_padj < 0.001 ~ "***",
+      binom_padj < 0.01  ~ "**",
+      binom_padj < 0.05  ~ "*",
       TRUE            ~ ""
     ),
     tissue_label = case_when(
