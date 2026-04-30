@@ -55,7 +55,7 @@ run_tissue_gsea <- function(species_name, organ_name, data, go_cache) {
     stats     = ranks,
     minSize   = 15,
     maxSize   = 500,
-    scoreType = "pos",
+    scoreType = "std",
     nPermSimple = 10000,
     eps = 0.0
   )
