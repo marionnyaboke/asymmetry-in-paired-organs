@@ -41,7 +41,7 @@ side_degs %>%
      arrange(desc(n))
 ```
 
-```{r}
+```{r LFC distribution_barplot}
 library(ggplot2)
 library(dplyr)
 library(tidyr)
@@ -103,11 +103,11 @@ p1 <- p1_data %>%
   labs(x = NULL, y = "log2 Fold Change (R vs L)") +
   theme_pres()
 
-ggsave("31-03-DEG.pdf", p1, path = "results/figures", width = 10, height = 6)
+ggsave("DEG_dist.pdf", p1, path = "results/figures", width = 10, height = 6)
 ```
 
 
-```{r}
+```{r LFC distribution_cleveland}
 org_order <- c("Heart\nVentricle (Mouse)", "Heart\nVentricle (Pig)",
               "Adrenal\nCortex", "Adrenal\nWhole", "Blood\nVessel",
               "Thyroid", "Muscle", "Skin", "Adipose",
@@ -193,9 +193,7 @@ ggsave("DEG_cleveland.pdf", p_cleveland, path = "results/figures",
        width = 10, height = 6)
 ```
 
-The binomial test assumes each gene independently has equal probability of being left or right-biased. The permutation test randomly flips LFC signs, which preserves the actual magnitude distribution but shuffles direction.
-
-```{r binomial}
+```{r binomial test}
 binom_results <- side_degs %>%
   filter(organ != "heart ventricle") %>%
   mutate(
@@ -279,71 +277,6 @@ ggsave("DEG_diverging_bar.pdf", p_div, path = "results/figures",
        width = 12, height = 5)
 ```
 
-```{r}
-div_data <- side_degs %>%
-  filter(organ != "heart ventricle") %>%
-  mutate(
-    organ_short = case_when(
-      organ == "Adrenal Gland Cortex" ~ "Adrenal Cortex",
-      organ == "Adrenal Gland Whole"  ~ "Adrenal Whole",
-      organ == "Adipose Tissue"       ~ "Adipose",
-      organ == "Blood Vessel"         ~ "Blood Vessel",
-      TRUE ~ organ
-    ),
-    label = organ_short,
-    direction = ifelse(log2FoldChange > 0, "Right", "Left")
-  ) %>%
-  count(label, direction) %>%
-  group_by(label) %>%
-  mutate(
-    total = sum(n),
-    pct = n / total * 100,
-    pct_plot = ifelse(direction == "Left", -pct, pct)
-  ) %>%
-  ungroup() %>%
-  left_join(binom_results %>% select(label, padj_label, binom_padj), by = "label") %>%
-  mutate(
-    text_label = case_when(
-      direction == "Left" ~ paste0(round(pct, 1), "%"),
-      direction == "Right" & binom_padj < 0.05 ~ paste0(round(pct, 1), "% (", padj_label, ")"),
-      TRUE ~ paste0(round(pct, 1), "%")
-    )
-  )
-
-label_order <- div_data %>%
-  group_by(label) %>%
-  summarise(total = first(total)) %>%
-  arrange(total) %>%
-  pull(label)
-
-div_data <- div_data %>%
-  mutate(label = factor(label, levels = label_order))
-
-p_div <- ggplot(div_data, aes(x = pct_plot, y = label, fill = direction)) +
-  geom_col(width = 0.7) +
-  geom_text(aes(label = text_label),
-            hjust = ifelse(div_data$direction == "Left", 1.2, -0.2),
-            size = 3, color = "grey20") +
-  geom_vline(xintercept = 0, color = "grey30", linewidth = 0.3) +
-  scale_fill_manual(
-    values = c("Left" = "#F4A582", "Right" = "#92C5DE"),
-    name = NULL
-  ) +
-  scale_x_continuous(labels = function(x) paste0(abs(x), "%"),
-                     expand = expansion(mult = 0.5)) +
-  labs(x = "Frequency of DEGs", y = NULL) +
-  theme_pres() +
-  theme(
-    legend.position = "right",
-    legend.text = element_text(size = 9),
-    legend.key.size = unit(0.6, "cm")
-  )
-
-ggsave("DEG_diverging_bar_freq.pdf", p_div, path = "results/figures",
-       width = 12, height = 5)
-```
-
-Permutation test: for each organ, test whether the observed proportion of right-biased DEGs differs from 50%
 ```{r sign permutation test}
 library(ggplot2)
 library(dplyr)
@@ -372,7 +305,6 @@ perm_results <- perm_input %>%
     n_right_obs = sum(log2FoldChange > 0),
     n_left_obs  = sum(log2FoldChange <= 0),
     pct_right_obs = n_right_obs / n_total * 100,
-    # Permutation: randomly flip LFC signs and count right-biased
     perm_p = {
       lfc <- log2FoldChange
       obs_right <- sum(lfc > 0)
@@ -472,83 +404,6 @@ p_perm <- ggplot(bar_data, aes(x = organ_short, y = count, fill = direction)) +
 
 ggsave("DEG_permutation_bar.pdf", p_perm, path = "results/figures",
        width = 10, height = 6)
-
-perm_results %>%
-  select(organ_short, n_total, n_right_obs, n_left_obs, pct_right_obs, perm_p, perm_padj) %>%
-  arrange(perm_padj) %>%
-  as.data.frame()
-```
-
-```{r}
-bar_data <- perm_results %>%
-  mutate(
-    pct_right = n_right_obs / n_total * 100,
-    pct_left = n_left_obs / n_total * 100
-  ) %>%
-  select(organ_short, pct_left, pct_right, perm_padj, padj_label, sig) %>%
-  pivot_longer(cols = c(pct_left, pct_right),
-               names_to = "direction", values_to = "pct") %>%
-  mutate(
-    direction = ifelse(direction == "pct_right", "Right", "Left"),
-    direction = factor(direction, levels = c("Right", "Left")),
-    organ_short = reorder(organ_short, -pct)
-  )
-
-organ_levels <- levels(bar_data$organ_short)
-
-sig_labels <- perm_results %>%
-  filter(sig) %>%
-  mutate(
-    max_pct = pmax(n_right_obs, n_left_obs) / n_total * 100,
-    organ_short = factor(organ_short, levels = organ_levels)
-  )
-
-p_perm <- ggplot(bar_data, aes(x = organ_short, y = pct, fill = direction)) +
-  geom_col(position = position_dodge(width = 0.7), width = 0.6,
-           color = "grey40", linewidth = 0.3) +
-  geom_segment(
-    data = sig_labels,
-    aes(x = as.numeric(organ_short) - 0.18,
-        xend = as.numeric(organ_short) + 0.18,
-        y = max_pct + 5, yend = max_pct + 5),
-    inherit.aes = FALSE, linewidth = 0.4, color = "grey30"
-  ) +
-  geom_segment(
-    data = sig_labels,
-    aes(x = as.numeric(organ_short) - 0.18,
-        xend = as.numeric(organ_short) - 0.18,
-        y = max_pct + 5, yend = max_pct + 3),
-    inherit.aes = FALSE, linewidth = 0.4, color = "grey30"
-  ) +
-  geom_segment(
-    data = sig_labels,
-    aes(x = as.numeric(organ_short) + 0.18,
-        xend = as.numeric(organ_short) + 0.18,
-        y = max_pct + 5, yend = max_pct + 3),
-    inherit.aes = FALSE, linewidth = 0.4, color = "grey30"
-  ) +
-  geom_text(
-    data = sig_labels,
-    aes(x = as.numeric(organ_short), y = max_pct + 7,
-        label = padj_label),
-    inherit.aes = FALSE, size = 2.8, color = "grey30"
-  ) +
-  scale_fill_manual(
-    values = c("Left" = "white", "Right" = "grey60"),
-    name = NULL
-  ) +
-  scale_y_continuous(labels = function(x) paste0(x, "%")) +
-  labs(x = NULL, y = "Frequency of DEGs") +
-  theme_pres() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right",
-    legend.text = element_text(size = 9),
-    legend.key.size = unit(0.6, "cm")
-  )
-
-ggsave("DEG_permutation_bar_freq.pdf", p_perm, path = "results/figures",
-       width = 10, height = 6)
 ```
 
 ```{r}
@@ -563,7 +418,7 @@ dist_data <- side_degs %>%
     )
   )
 
-# Summary stats + dip test per organ
+# Summary stats and dip test per organ
 organ_stats <- dist_data %>%
   group_by(organ_short) %>%
   summarise(
@@ -604,7 +459,3 @@ ggsave("DEG_LFC_distributions_filt.pdf", p_dist, path = "results/figures",
 
 organ_stats %>% as.data.frame()
 ```
-
-
-
-
